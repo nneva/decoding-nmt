@@ -120,7 +120,7 @@ class LSTMEncoder(Seq2SeqEncoder):
         src_embeddings = self.embedding(src_tokens)
         _src_embeddings = F.dropout(src_embeddings, p=self.dropout_in, training=self.training)
 
-        # Transpose batch: [batch_size, src_time_steps, num_features] -> [src_time_steps, batch_size, num_features]
+        # Transpose batch: [batch_size (25), src_time_steps (6), num_features (64)] -> [src_time_steps (6), batch_size (25), num_features (64)]
         src_embeddings = _src_embeddings.transpose(0, 1)
 
         # Pack embedded tokens into a PackedSequence
