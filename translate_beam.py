@@ -141,12 +141,14 @@ def main(args):
                 # we are indeed getting the most probable candidate word associated with this value.
                 # with squared regularizer we would like to increase the log probs such that during decoding we choose a candidate word with the highest log prob
                 # but by putting the minus sign in front of the node ('score' in beam.py), we will achieve the same.
-                # PriorityQueue returns the smallest value by default, so if we add the minus sign in front of each log prob (node), the highest log prob will become the lowest,
-                # thus always returned first. https://docs.python.org/3/library/queue.html#queue.PriorityQueue + Martijn Pieters 
+                # PriorityQueue returns the smallest value by default, so if we add the minus sign in front of each log prob (node), the lowest log prob will become the highest,
+                # thus always returned first. https://docs.python.org/3/library/queue.html#queue.PriorityQueue + Martijn Pieters.
+                # note that log probs are always negative, i.e. log_2(p=0.4) = -1.322, log_2(p=0.6) = -0.737 etc.,
+                # before applying any of the steps described previously: square/minus sign are going to make log probs positive.
                 if not args.regularizer:
                     searches[i].add(-node.eval(args.alpha), node)
                 else:
-                    searches[i].add(args.lambda_ * node.eval(args.alpha)**2, node) 
+                    searches[i].add(node.eval(args.alpha), node) 
 
         # Start generating further tokens until max sentence length reached
         for _ in range(args.max_len-1):
@@ -212,14 +214,19 @@ def main(args):
                     # in case the node doesn't contain <EOS>, we want to add the node to the current nodes for the next iteration (continue of the search)
                     # "add" adds a node that can contain anything else except for <EOS>
                     else:
-                        node = BeamSearchNode(
-                            search, node.emb, node.lstm_out, node.final_hidden,
-                            node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
-                            next_word)), node.logp + log_p, node.length + 1
-                            )
                         if not args.regularizer:
+                            node = BeamSearchNode(
+                                search, node.emb, node.lstm_out, node.final_hidden,
+                                node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
+                                next_word)), node.logp + log_p, node.length + 1
+                                )
                             search.add(-node.eval(args.alpha), node) 
                         else:
+                            node = BeamSearchNode(
+                                search, node.emb, node.lstm_out, node.final_hidden,
+                                node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
+                                next_word)), node.logp - log_p, node.length + 1
+                            )
                             search.add(args.lambda_ * node.eval(args.alpha)**2, node)
 
             # we discontinue further search for all other nodes except for the beam_size number of nodes with the lowest negative log prob 
@@ -228,7 +235,8 @@ def main(args):
                 search.prune()
 
         # Segment into sentences
-        # 'best_sents' shape: (batch_size, max_length)
+        # 'best_sents' shape: (beam_size, max_length)
+        # torch.stack([A,B],dim = 0) is equivalent to torch.cat([A.unsqueeze(0),b.unsqueeze(0)],dim = 0)
         best_sents = torch.stack([search.get_best()[1].sequence[1:].cpu() for search in searches])
         decoded_batch = best_sents.numpy()
 
@@ -248,7 +256,6 @@ def main(args):
 
         # Convert arrays of indices into strings of words
         output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
-
         for ii, sent in enumerate(output_sentences):
             all_hyps[int(sample['id'].data[ii])] = sent
 
