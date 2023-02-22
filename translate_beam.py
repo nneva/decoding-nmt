@@ -29,13 +29,15 @@ def get_args():
     parser.add_argument('--max-len', default=100, type=int, help='maximum length of generated sequence')
 
     # Add beam search arguments
-    parser.add_argument('--beam-size', default=5, type=int, help='number of hypotheses expanded in beam search')
+    parser.add_argument('--beam-size', default=5, type=int, required=True, help='number of hypotheses expanded in beam search')
     # alpha hyperparameter for length normalization (described as lp in https://arxiv.org/pdf/1609.08144.pdf equation 14)
     parser.add_argument('--alpha', default=0.0, type=float, help='alpha for softer length normalization')
     # use squared regularizer (as described in https://aclanthology.org/2020.emnlp-main.170.pdf, eq. 16)
     parser.add_argument('--regularizer', default=False, type=bool, help='whether to apply regularizer or not')
     # lambda hyperparameter for squared regularizer
     parser.add_argument('--lambda_', default=0.0, type=float, help='hyperparameter to control strength of regularization')
+    # how many best hypotheses to return
+    parser.add_argument('--n_best', default=1, type=int, help='number of hypotheses to return')
 
     return parser.parse_args()
 
@@ -49,6 +51,9 @@ def main(args):
     args = args_loaded
     utils.init_logging(args)
 
+    assert args.beam_size > 0, f"beam_size must be positive"
+    assert args.n_best <= args.beam_size, f"n_best must be smaller than or equal to {args.beam_size}"
+    
     # Load dictionaries
     src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
     logging.info('Loaded a source dictionary ({:s}) with {:d} words'.format(args.source_lang, len(src_dict)))
@@ -155,6 +160,7 @@ def main(args):
 
             # Get the current nodes to expand (total nodes = batch_size * beam_size)
             nodes = list(n[1] for s in searches for n in s.get_current_beams())
+            print(nodes)
             if nodes == []:
                 break # All beams ended in EOS
 
@@ -235,30 +241,29 @@ def main(args):
                 search.prune()
 
         # Segment into sentences
-        # 'best_sents' shape: (beam_size, max_length)
-        # torch.stack([A,B],dim = 0) is equivalent to torch.cat([A.unsqueeze(0),b.unsqueeze(0)],dim = 0)
-        best_sents = torch.stack([search.get_best()[1].sequence[1:].cpu() for search in searches])
-        decoded_batch = best_sents.numpy()
+        # 'best_sents' shape: (batch_size, max_length) -> (batch_size * n_best, max_len)
+        best_sents = torch.stack([s[1].sequence[1:].cpu() for s in search.get_best(args.n_best) for search in searches]).numpy()
+        assert best_sents.shape[0] == batch_size * args.n_best
 
-        output_sentences = [decoded_batch[row, :] for row in range(decoded_batch.shape[0])]
-
-        # loop over all the sequences (num_sequences == batch_size) 
-        # each sequence is of the length as passed to args.max_length
+        output_sentences = [best_sents[row, :] for row in range(best_sents.shape[0])]
+        
+        # loop over all the sequences (num_sequences == batch_size * n_best) 
+        # each sequence is of the length as passed to args.max_len
         # if <EOS> symbol idx > 0, we store indices up to the current idx as a single sentence in temp
         temp = list()
         for sent in output_sentences:
             first_eos = np.where(sent == tgt_dict.eos_idx)[0]
-            if len(first_eos) > 0:
+            if len(first_eos) > 0: 
                 temp.append(sent[:first_eos[0]])
             else:
                 temp.append(sent)
         output_sentences = temp
 
         # Convert arrays of indices into strings of words
-        output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
+        output_sentences = [[tgt_dict.string(sent) for sent in output_sentences[i+i:args.n_best+i+i]] for i in range(batch_size)]
+
         for ii, sent in enumerate(output_sentences):
             all_hyps[int(sample['id'].data[ii])] = sent
-
 
     # Write to file
     if args.output is not None:
