@@ -53,6 +53,9 @@ def main(args):
 
     assert args.beam_size > 0, f"beam_size must be positive"
     assert args.n_best <= args.beam_size, f"n_best must be smaller than or equal to {args.beam_size}"
+
+    # to deduplicate: take 2 x beam_size but return n_best sentence
+    beam_size = 2 * args.beam_size
     
     # Load dictionaries
     src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
@@ -85,7 +88,7 @@ def main(args):
         # 'src_tokens' shape: (batch_size, src_time_steps), batch_size over 1st dimension of src_tokens
         batch_size = sample['src_tokens'].shape[0] 
         # Create a beam search objects of the batch size for every input sentence (total = batch_size * beam_size)
-        searches = [BeamSearch(args.beam_size, args.max_len - 1, tgt_dict.unk_idx) for i in range(batch_size)]
+        searches = [BeamSearch(beam_size, args.max_len - 1, tgt_dict.unk_idx) for i in range(batch_size)]
 
         with torch.no_grad():
             # Compute the encoder output 
@@ -116,11 +119,11 @@ def main(args):
             # by adding one to the initial beam_size, we ensure to get the desired number of fully generated sequeces
             # 'log_probs'/'next candidates' shape: (batch_size, 1, beam_size+1)
             log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)),
-                                                    args.beam_size+1, dim=-1)
+                                                    beam_size+1, dim=-1)
 
         # Create number of beam_size beam search nodes for every input sentence
         for i in range(batch_size):
-            for j in range(args.beam_size):
+            for j in range(beam_size):
                 best_candidate = next_candidates[i, :, j]
                 backoff_candidate = next_candidates[i, :, j+1]
                 best_log_p = log_probs[i, :, j]
@@ -160,7 +163,6 @@ def main(args):
 
             # Get the current nodes to expand (total nodes = batch_size * beam_size)
             nodes = list(n[1] for s in searches for n in s.get_current_beams())
-            print(nodes)
             if nodes == []:
                 break # All beams ended in EOS
 
@@ -183,11 +185,11 @@ def main(args):
 
             
             # 'log_probs'/'next candidates' shape: (beam_size * batch_size, time_step, beam_size+1)
-            log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)), args.beam_size+1, dim=-1)
+            log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)), beam_size+1, dim=-1)
 
             # Create number of beam_size next nodes for every current node
             for i in range(log_probs.shape[0]):
-                for j in range(args.beam_size):
+                for j in range(beam_size):
                     # pick a best and the next (backoff) candidate
                     best_candidate = next_candidates[i, :, j]
                     backoff_candidate = next_candidates[i, :, j+1]
@@ -242,7 +244,7 @@ def main(args):
 
         # Segment into sentences
         # 'best_sents' shape: (batch_size, max_length) -> (batch_size * n_best, max_len)
-        best_sents = torch.stack([s[1].sequence[1:].cpu() for s in search.get_best(args.n_best) for search in searches]).numpy()
+        best_sents = torch.stack([s[2].sequence[1:].cpu() for search in searches for s in search.get_best(args.n_best)]).numpy()
         assert best_sents.shape[0] == batch_size * args.n_best
 
         output_sentences = [best_sents[row, :] for row in range(best_sents.shape[0])]
@@ -257,19 +259,19 @@ def main(args):
                 temp.append(sent[:first_eos[0]])
             else:
                 temp.append(sent)
-        output_sentences = temp
 
         # Convert arrays of indices into strings of words
-        output_sentences = [[tgt_dict.string(sent) for sent in output_sentences[i+i:args.n_best+i+i]] for i in range(batch_size)]
+        output_sentences = [[tgt_dict.string(sent) for sent in temp[i:i+args.n_best]] for i in range(0, len(temp), args.n_best)]
 
         for ii, sent in enumerate(output_sentences):
             all_hyps[int(sample['id'].data[ii])] = sent
 
+    # check this
     # Write to file
     if args.output is not None:
         with open(args.output, 'w') as out_file:
             for sent_id in range(len(all_hyps.keys())):
-                out_file.write(all_hyps[sent_id] + '\n')
+                out_file.write(" ".join(all_hyps[sent_id]) + '\n')
 
 
 if __name__ == '__main__':

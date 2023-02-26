@@ -49,8 +49,8 @@ class BeamSearch(object):
         for _ in range(self.nodes.qsize()):
             node = self.nodes.get()
             merged.put(node)
-
-        return [(node[0], node[2]) for node in merged.queue]
+        
+        return [merged.get() for _ in range(n) if not merged.empty()]
 
     def prune(self):
         """ Removes all nodes but the beam_size best ones (lowest neg log prob) """
