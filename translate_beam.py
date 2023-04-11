@@ -38,6 +38,12 @@ def get_args():
     parser.add_argument('--lambda_', default=0.0, type=float, help='hyperparameter to control strength of regularization')
     # how many best hypotheses to return
     parser.add_argument('--n_best', default=1, type=int, help='number of hypotheses to return')
+    
+    parser.add_argument('--deduplicate', default=False, type=bool, help='deduplicate n_best sentences')
+    # whether to include diverse beam search
+    parser.add_argument('--diverse-beam', default=False, type=bool, help='whether to apply diverse beam search')
+    # hyper parameter to control strength of diverse beam serach
+    parser.add_argument('--gamma', default=1, type=int, help='hyperparameter to control beam search diversity')
 
     return parser.parse_args()
 
@@ -54,9 +60,12 @@ def main(args):
     assert args.beam_size > 0, f"beam_size must be positive"
     assert args.n_best <= args.beam_size, f"n_best must be smaller than or equal to {args.beam_size}"
 
-    # to deduplicate: take 2 x beam_size but return n_best sentence
-    beam_size = 2 * args.beam_size
+    # to deduplicate: take 2 x beam_size but return n_best sentences
+    if args.deduplicate:
+        beam_size = 2 * args.beam_size
     
+    beam_size = args.beam_size
+
     # Load dictionaries
     src_dict = Dictionary.load(os.path.join(args.dicts, 'dict.{:s}'.format(args.source_lang)))
     logging.info('Loaded a source dictionary ({:s}) with {:d} words'.format(args.source_lang, len(src_dict)))
@@ -153,10 +162,10 @@ def main(args):
                 # thus always returned first. https://docs.python.org/3/library/queue.html#queue.PriorityQueue + Martijn Pieters.
                 # note that log probs are always negative, i.e. log_2(p=0.4) = -1.322, log_2(p=0.6) = -0.737 etc.,
                 # before applying any of the steps described previously: square/minus sign are going to make log probs positive.
-                if not args.regularizer:
-                    searches[i].add(-node.eval(args.alpha), node)
+                if args.regularizer:
+                    searches[i].add(node.eval(args.alpha), node)
                 else:
-                    searches[i].add(node.eval(args.alpha), node) 
+                    searches[i].add(-node.eval(args.alpha), node)
 
         # Start generating further tokens until max sentence length reached
         for _ in range(args.max_len-1):
@@ -215,41 +224,48 @@ def main(args):
                             node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
                             next_word)), node.logp, node.length
                             )
-                        if not args.regularizer:
-                            search.add_final(-node.eval(args.alpha), node)
-                        else:
+                        if args.regularizer:
                             search.add_final(args.lambda_ * node.eval(args.alpha)**2, node)
+                        else:
+                            search.add_final(-node.eval(args.alpha), node)
+                            
                     # in case the node doesn't contain <EOS>, we want to add the node to the current nodes for the next iteration (continue of the search)
                     # "add" adds a node that can contain anything else except for <EOS>
                     else:
-                        if not args.regularizer:
-                            node = BeamSearchNode(
-                                search, node.emb, node.lstm_out, node.final_hidden,
-                                node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
-                                next_word)), node.logp + log_p, node.length + 1
-                                )
-                            search.add(-node.eval(args.alpha), node) 
-                        else:
+                        if args.regularizer:
                             node = BeamSearchNode(
                                 search, node.emb, node.lstm_out, node.final_hidden,
                                 node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
                                 next_word)), node.logp - log_p, node.length + 1
-                            )
+                                )
                             search.add(args.lambda_ * node.eval(args.alpha)**2, node)
+                        else:
+                            node = BeamSearchNode(
+                                    search, node.emb, node.lstm_out, node.final_hidden,
+                                    node.final_cell, node.mask, torch.cat((prev_words[i][0].view([1]),
+                                    next_word)), node.logp + log_p, node.length + 1
+                                    )
+                            search.add(-node.eval(args.alpha), node)
+                            
 
             # we discontinue further search for all other nodes except for the beam_size number of nodes with the lowest negative log prob 
             # also, excluding the paths that are already finished (with <EOS>).
             for search in searches:
-                search.prune()
+                if args.diverse_beam:
+                    sorted_search = sorted(search.nodes.queue, key=lambda n: n[0])
+                    search.nodes.queue = [(n[0] - (args.gamma * rank), n[1], n[2]) for rank, n in enumerate(sorted_search, start=1)]
+                search.prune(args.diverse_beam)
 
         # Segment into sentences
         # 'best_sents' shape: (batch_size, max_length) -> (batch_size * n_best, max_len)
-        best_sents = torch.stack([s[2].sequence[1:].cpu() for search in searches for s in search.get_best(args.n_best)]).numpy()
+        best_sents = torch.stack([n[2].sequence[1:].cpu() for s in searches for n in s.get_best(args.n_best)])
+        best_sents = best_sents.numpy()
         assert best_sents.shape[0] == batch_size * args.n_best
+
 
         output_sentences = [best_sents[row, :] for row in range(best_sents.shape[0])]
         
-        # loop over all the sequences (num_sequences == batch_size * n_best) 
+        # loop over all the sequences 
         # each sequence is of the length as passed to args.max_len
         # if <EOS> symbol idx > 0, we store indices up to the current idx as a single sentence in temp
         temp = list()
@@ -266,7 +282,6 @@ def main(args):
         for ii, sent in enumerate(output_sentences):
             all_hyps[int(sample['id'].data[ii])] = sent
 
-    # check this
     # Write to file
     if args.output is not None:
         with open(args.output, 'w') as out_file:

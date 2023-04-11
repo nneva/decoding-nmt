@@ -41,26 +41,30 @@ class BeamSearch(object):
         # Merge EOS paths and those that were stopped by
         # max sequence length (still in nodes)
         merged = PriorityQueue()
-    
-        for _ in range(n):
+        for _ in range(self.final.qsize()):
             node = self.final.get()
             merged.put(node)
 
-        for _ in range(self.nodes.qsize()):
-            node = self.nodes.get()
-            merged.put(node)
-        
         return [merged.get() for _ in range(n) if not merged.empty()]
 
-    def prune(self):
+
+    def prune(self, diverse):
         """ Removes all nodes but the beam_size best ones (lowest neg log prob) """
         nodes = PriorityQueue()
         # Keep track of how many search paths are already finished (EOS)
         finished = self.final.qsize()
-        for _ in range(self.beam_size-finished):
-            node = self.nodes.get()
-            nodes.put(node)
-        self.nodes = nodes
+        if diverse:
+            for _ in range(self.beam_size-finished):
+                node = self.nodes.get()
+                nodes.put(node)
+                # keep the highest priority for node with the lowest neg log prob 
+                self.nodes.queue = sorted(self.nodes.queue, key=lambda n: n[0])
+            self.nodes.queue = sorted(nodes.queue, key=lambda n: n[0])
+        else:
+            for _ in range(self.beam_size-finished):
+                node = self.nodes.get()
+                nodes.put(node)
+            self.nodes = nodes
 
 
 class BeamSearchNode(object):
